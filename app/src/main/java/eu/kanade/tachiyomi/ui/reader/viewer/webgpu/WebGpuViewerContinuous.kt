@@ -25,6 +25,8 @@ class WebGpuViewerContinuous(activity: ReaderActivity, val useGap: Boolean = fal
     private val state get() = (pager as ImageViewContinuous).state
 
     init {
+        state.backgroundColor = readerBackgroundColor()
+
         // Scrolling clear of a transition page is the only point this mode can call the chapter
         // before it finished - reaching a page's top comes a screen too early. Reported on every
         // change, so scrolling back up over it and down again selects that last page again.

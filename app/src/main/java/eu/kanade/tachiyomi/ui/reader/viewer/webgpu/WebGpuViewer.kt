@@ -83,7 +83,7 @@ open class WebGpuViewer(
     @Volatile
     private var cachedOnBackgroundColor: Int? = null
 
-    private fun readerBackgroundColor(): Int =
+    protected fun readerBackgroundColor(): Int =
         cachedBackgroundColor ?: activity.baseContext.readerBackgroundColor(config.theme)
             .also { cachedBackgroundColor = it }
 
@@ -925,6 +925,7 @@ open class WebGpuViewer(
                 }
 
                 (this as? ImageViewerContinuousState)?.let {
+                    backgroundColor = readerBackgroundColor()
                     homeScale = config.continuousMinWidth / 100f
                     scale = homeScale
                     minScale = if (config.zoomOutDisabled) 0f else 0.1f
