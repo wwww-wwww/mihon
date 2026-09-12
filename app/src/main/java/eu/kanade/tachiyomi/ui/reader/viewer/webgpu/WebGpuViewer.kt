@@ -1104,11 +1104,13 @@ open class WebGpuViewer(
             }
 
             ImageDecoder.new(input).use { dec ->
-                page.taggedSpreadPosition = when (dec.getTag("PageName")) {
-                    "Left" -> SpreadPosition.LEFT
-                    "Right" -> SpreadPosition.RIGHT
-                    null -> null
-                    else -> SpreadPosition.SINGLE
+                if (isDualPageMode()) {
+                    page.taggedSpreadPosition = when (dec.getTag("PageName")) {
+                        "Left" -> SpreadPosition.LEFT
+                        "Right" -> SpreadPosition.RIGHT
+                        null -> null
+                        else -> SpreadPosition.SINGLE
+                    }
                 }
 
                 val pageCount = dec.pages
