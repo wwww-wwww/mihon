@@ -33,9 +33,6 @@ import ca.mpreg.webgpuviewer.transition.TransitionStackUp
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState
 import com.google.android.material.color.MaterialColors
-import de.stefan_oltmann.kim.Kim
-import de.stefan_oltmann.kim.android.readMetadata
-import de.stefan_oltmann.kim.format.tiff.constant.TiffTag
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
@@ -1090,27 +1087,6 @@ open class WebGpuViewer(
                 }
             }
 
-            // Buffered to read the spread tag, then decoded from the buffer. On the preference,
-            // not isDualPageMode(): WIDE is portrait-off, and a rotate never re-decodes. Never in
-            // continuous, where nothing pairs - that mode reads the stream instead of holding it.
-            val bytes = if (!isContinuous && config.dualPageView != ReaderPreferences.DualPageView.NEVER) {
-                input.readBytes()
-            } else {
-                null
-            }
-
-            // Left untouched for a file that names no side - [spreadPosition] then derives one.
-            if (bytes != null) {
-                val tag = Kim.readMetadata(bytes.inputStream(), bytes.size.toLong())
-                    ?.findStringValue(TiffTag.TIFF_TAG_PAGE_NAME)
-                page.taggedSpreadPosition = when (tag) {
-                    "Left" -> SpreadPosition.LEFT
-                    "Right" -> SpreadPosition.RIGHT
-                    null -> null
-                    else -> SpreadPosition.SINGLE
-                }
-            }
-
             // The decoder hands the map over unapplied - see ImageDecoder.Gainmap - because how
             // much of it to use depends on the display, so the viewer applies it.
             fun ImageDecoder.DecodeResult.gainmapInput(): GainmapInput? = gainmap?.let {
@@ -1127,121 +1103,128 @@ open class WebGpuViewer(
                 )
             }
 
-            val dec = ImageDecoder.new(bytes?.inputStream() ?: input)
+            ImageDecoder.new(input).use { dec ->
+                page.taggedSpreadPosition = when (dec.getTag("PageName")) {
+                    "Left" -> SpreadPosition.LEFT
+                    "Right" -> SpreadPosition.RIGHT
+                    null -> null
+                    else -> SpreadPosition.SINGLE
+                }
 
-            val pageCount = dec.pages
+                val pageCount = dec.pages
 
-            if (pageCount == 0) throw Exception("No frames decoded")
+                if (pageCount == 0) throw Exception("No frames decoded")
 
-            val backgroundColor = if (config.automaticBackground) null else readerBackgroundColor()
+                val backgroundColor = if (config.automaticBackground) null else readerBackgroundColor()
 
-            val firstFrame = dec.decodeNext()
+                val firstFrame = dec.decodeNext()
 
-            val imagePage = if (pageCount == 1) {
-                // Only trim when not animated and not in dual page mode
-                val trimColors = if (config.imageCropBorders && !isDualPageMode()) {
-                    listOf(
-                        floatArrayOf(1f, 1f, 1f),
-                        floatArrayOf(0f, 0f, 0f),
+                val imagePage = if (pageCount == 1) {
+                    // Only trim when not animated and not in dual page mode
+                    val trimColors = if (config.imageCropBorders && !isDualPageMode()) {
+                        listOf(
+                            floatArrayOf(1f, 1f, 1f),
+                            floatArrayOf(0f, 0f, 0f),
+                        )
+                    } else {
+                        null
+                    }
+
+                    val firstImage = Image(
+                        firstFrame.image,
+                        firstFrame.width,
+                        firstFrame.height,
+                        createMipMaps = true,
+                        trimColors = trimColors,
+                        trimThreshold = 0.15f,
+                        backgroundColor = backgroundColor,
+                        hdr = firstFrame.isHdr,
+                        hdrHeadroom = firstFrame.hdrHeadroom,
+                        gainmap = firstFrame.gainmapInput(),
                     )
+
+                    ImagePage.ImageSingle(firstImage)
                 } else {
-                    null
+                    val frames = ArrayList<Pair<Image, Int>>(pageCount)
+
+                    // Built frames hold uploaded textures, and ImageSingle owns the only teardown.
+                    fun discardFrames() {
+                        if (frames.isNotEmpty()) ImagePage.ImageSingle(frames).cleanup()
+                    }
+
+                    val firstImage = Image(
+                        firstFrame.image,
+                        firstFrame.width,
+                        firstFrame.height,
+                        createMipMaps = false,
+                        backgroundColor = backgroundColor,
+                        hdr = firstFrame.isHdr,
+                        hdrHeadroom = firstFrame.hdrHeadroom,
+                        gainmap = firstFrame.gainmapInput(),
+                    )
+
+                    frames.add(Pair(firstImage, firstFrame.duration))
+
+                    try {
+                        for (i in 1 until pageCount) {
+                            // Under lock: a decode this long gives an eviction's cleanup() time to land.
+                            val stillWanted = synchronized(lock) {
+                                pageInCache(page).also { inCache ->
+                                    if (inCache) {
+                                        (page.imagePage as? ProgressPage)?.progress = i.toFloat() / pageCount
+                                    }
+                                }
+                            }
+
+                            // Scrolled past: the frames left are work nothing will draw.
+                            if (!stillWanted) {
+                                discardFrames()
+                                return
+                            }
+
+                            val frame = dec.decodeNext()
+                            val image = Image(
+                                frame.image,
+                                frame.width,
+                                frame.height,
+                                createMipMaps = false,
+                                backgroundColor = firstImage.backgroundColor,
+                                hdr = frame.isHdr,
+                                hdrHeadroom = frame.hdrHeadroom,
+                                gainmap = frame.gainmapInput(),
+                            )
+                            frames.add(Pair(image, frame.duration))
+                        }
+                    } catch (e: Throwable) {
+                        discardFrames()
+                        throw e
+                    }
+
+                    ImagePage.ImageSingle(frames)
                 }
 
-                val firstImage = Image(
-                    firstFrame.image,
-                    firstFrame.width,
-                    firstFrame.height,
-                    createMipMaps = true,
-                    trimColors = trimColors,
-                    trimThreshold = 0.15f,
-                    backgroundColor = backgroundColor,
-                    hdr = firstFrame.isHdr,
-                    hdrHeadroom = firstFrame.hdrHeadroom,
-                    gainmap = firstFrame.gainmapInput(),
-                )
-
-                ImagePage.ImageSingle(firstImage)
-            } else {
-                val frames = ArrayList<Pair<Image, Int>>(pageCount)
-
-                // Built frames hold uploaded textures, and ImageSingle owns the only teardown.
-                fun discardFrames() {
-                    if (frames.isNotEmpty()) ImagePage.ImageSingle(frames).cleanup()
-                }
-
-                val firstImage = Image(
-                    firstFrame.image,
-                    firstFrame.width,
-                    firstFrame.height,
-                    createMipMaps = false,
-                    backgroundColor = backgroundColor,
-                    hdr = firstFrame.isHdr,
-                    hdrHeadroom = firstFrame.hdrHeadroom,
-                    gainmap = firstFrame.gainmapInput(),
-                )
-
-                frames.add(Pair(firstImage, firstFrame.duration))
-
-                try {
-                    for (i in 1 until pageCount) {
-                        // Under lock: a decode this long gives an eviction's cleanup() time to land.
-                        val stillWanted = synchronized(lock) {
-                            pageInCache(page).also { inCache ->
-                                if (inCache) {
-                                    (page.imagePage as? ProgressPage)?.progress = i.toFloat() / pageCount
+                synchronized(lock) {
+                    if (pageInCache(page) && !page.isDecoded && !page.imagePage.destroyed) {
+                        val oldImagePage = page.imagePage
+                        page.imagePage = imagePage
+                        noteIfLone(page)
+                        page.state = PageState.IDLE
+                        cleanupImage(oldImagePage)
+                        // Fade up from the placeholder's colour, if that placeholder was on screen -
+                        // one that decoded out of view has nothing left to fade from.
+                        if (oldImagePage.isOnScreen) imagePage.fadeIn()
+                        if (!isDualPageMode()) {
+                            (page.imagePage as? ImagePage.ImageSingle)?.let {
+                                if (!applyWideZoomIfNeeded(it)) {
+                                    applyFitModeAnchor(it)
                                 }
                             }
                         }
-
-                        // Scrolled past: the frames left are work nothing will draw.
-                        if (!stillWanted) {
-                            discardFrames()
-                            return
-                        }
-
-                        val frame = dec.decodeNext()
-                        val image = Image(
-                            frame.image,
-                            frame.width,
-                            frame.height,
-                            createMipMaps = false,
-                            backgroundColor = firstImage.backgroundColor,
-                            hdr = frame.isHdr,
-                            hdrHeadroom = frame.hdrHeadroom,
-                            gainmap = frame.gainmapInput(),
-                        )
-                        frames.add(Pair(image, frame.duration))
+                        pager.state.invalidate()
+                    } else {
+                        if (pageInCache(page)) page.state = PageState.IDLE
+                        imagePage.cleanup()
                     }
-                } catch (e: Throwable) {
-                    discardFrames()
-                    throw e
-                }
-
-                ImagePage.ImageSingle(frames)
-            }
-
-            synchronized(lock) {
-                if (pageInCache(page) && !page.isDecoded && !page.imagePage.destroyed) {
-                    val oldImagePage = page.imagePage
-                    page.imagePage = imagePage
-                    noteIfLone(page)
-                    page.state = PageState.IDLE
-                    cleanupImage(oldImagePage)
-                    // Fade up from the placeholder's colour, if that placeholder was on screen -
-                    // one that decoded out of view has nothing left to fade from.
-                    if (oldImagePage.isOnScreen) imagePage.fadeIn()
-                    if (!isDualPageMode()) {
-                        (page.imagePage as? ImagePage.ImageSingle)?.let {
-                            if (!applyWideZoomIfNeeded(it)) {
-                                applyFitModeAnchor(it)
-                            }
-                        }
-                    }
-                    pager.state.invalidate()
-                } else {
-                    if (pageInCache(page)) page.state = PageState.IDLE
-                    imagePage.cleanup()
                 }
             }
         }
