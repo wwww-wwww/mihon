@@ -9,9 +9,14 @@ import android.content.Intent
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -42,7 +47,11 @@ import androidx.core.transition.doOnEnd
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.window.layout.FoldingFeature
+import androidx.window.layout.WindowInfoTracker
 import com.google.android.material.transition.platform.MaterialContainerTransform
 import dev.zacsweers.metro.Inject
 import eu.kanade.domain.base.BasePreferences
@@ -81,6 +90,7 @@ import eu.kanade.tachiyomi.util.system.readerBackgroundColor
 import eu.kanade.tachiyomi.util.system.toShareIntent
 import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.view.setComposeContent
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
@@ -244,6 +254,61 @@ class ReaderActivity : BaseActivity() {
                 }
             }
             .launchIn(lifecycleScope)
+
+        val rawHingeAngleFlow = MutableStateFlow(180f)
+        val sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+        val hingeSensor = sensorManager.getSensorList(Sensor.TYPE_ALL)
+            .firstOrNull { it.stringType.contains("hinge", ignoreCase = true) }
+
+        val sensorListener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                if (event?.sensor == hingeSensor) {
+                    rawHingeAngleFlow.value = event?.values?.getOrNull(0) ?: 180f
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+
+        lifecycleScope.launch {
+            var half = false
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                hingeSensor?.let {
+                    sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_FASTEST)
+                }
+
+                try {
+                    WindowInfoTracker.getOrCreate(this@ReaderActivity)
+                        .windowLayoutInfo(this@ReaderActivity)
+                        .combine(rawHingeAngleFlow) { layoutInfo, currentAngle ->
+                            val foldingFeature = layoutInfo.displayFeatures
+                                .filterIsInstance<FoldingFeature>()
+                                .firstOrNull()
+
+                            val isApiHalfOpened = foldingFeature?.state == FoldingFeature.State.HALF_OPENED
+                            val isHardwareHalfOpened = currentAngle in 30.0f..150.0f
+
+                            Pair(foldingFeature, isApiHalfOpened || isHardwareHalfOpened)
+                        }
+                        .collect { (feature, halfOpened) ->
+                            if (feature != null) {
+                                if (halfOpened) {
+                                    half = true
+                                } else if (feature.state == FoldingFeature.State.FLAT && half) {
+                                    (viewModel.state.value.viewer as? WebGpuViewer)?.let {
+                                        if (it.isReversed) it.moveToPrevious() else it.moveToNext()
+                                    }
+                                    half = false
+                                }
+                            } else {
+                                half = false
+                            }
+                        }
+                } finally {
+                    sensorManager.unregisterListener(sensorListener)
+                }
+            }
+        }
     }
 
     private fun ReaderActivityBinding.setComposeOverlay(): Unit = composeOverlay.setComposeContent {
