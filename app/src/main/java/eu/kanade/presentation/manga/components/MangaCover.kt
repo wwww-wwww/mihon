@@ -10,10 +10,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import coil3.compose.AsyncImage
+import coil3.imageLoader
+import coil3.request.ImageRequest
 import eu.kanade.presentation.util.rememberResourceBitmapPainter
 import eu.kanade.tachiyomi.R
+import eu.kanade.tachiyomi.data.coil.customDecoder
 
 enum class MangaCover(val ratio: Float) {
     Square(1f / 1f),
@@ -28,8 +32,10 @@ enum class MangaCover(val ratio: Float) {
         shape: Shape = MaterialTheme.shapes.extraSmall,
         onClick: (() -> Unit)? = null,
     ) {
+        val context = LocalContext.current
+
         AsyncImage(
-            model = data,
+            model = ImageRequest.Builder(context).data(data).customDecoder(true).build(),
             placeholder = ColorPainter(CoverPlaceholderColor),
             error = rememberResourceBitmapPainter(id = R.drawable.cover_error),
             contentDescription = contentDescription,
@@ -47,6 +53,7 @@ enum class MangaCover(val ratio: Float) {
                     },
                 ),
             contentScale = ContentScale.Crop,
+            imageLoader = context.imageLoader,
         )
     }
 }

@@ -2,20 +2,20 @@ package eu.kanade.tachiyomi.data.coil
 
 import android.graphics.Bitmap
 import androidx.core.graphics.createBitmap
-import androidx.core.graphics.scale
 import ca.mpreg.imagedecoder.ImageDecoder
 import coil3.Canvas
 import coil3.Image
 import coil3.ImageLoader
 import coil3.asImage
 import coil3.decode.DecodeResult
-import coil3.decode.DecodeUtils
 import coil3.decode.Decoder
 import coil3.decode.ImageSource
 import coil3.fetch.SourceFetchResult
 import coil3.request.Options
 import okio.BufferedSource
 import tachiyomi.core.common.util.system.ImageUtil
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * A [Decoder] that uses [ImageDecoder] to decode image formats not supported
@@ -70,38 +70,50 @@ class ImageDecoder(private val resources: ImageSource, private val options: Opti
         // Normal path: produce a Bitmap scaled to the requested output size.
         val dstWidth = options.size.widthPx(options.scale) { srcWidth }
         val dstHeight = options.size.heightPx(options.scale) { srcHeight }
-        val sampleSize = DecodeUtils.calculateInSampleSize(
-            srcWidth = srcWidth,
-            srcHeight = srcHeight,
-            dstWidth = dstWidth,
-            dstHeight = dstHeight,
-            scale = options.scale,
-        )
 
-        // Copy RGBA pixels from the native buffer into a full-resolution bitmap.
-        // We must do this while `res` (and its native memory) is still alive.
-        // HDR frames are half-float RGBA.
+        val scale = min(dstWidth.toFloat() / srcWidth, dstHeight.toFloat() / srcHeight)
+        val width = (srcWidth * scale).roundToInt().coerceIn(1, srcWidth)
+        val height = (srcHeight * scale).roundToInt().coerceIn(1, srcHeight)
+
         val config = if (res.isHdr) Bitmap.Config.RGBA_F16 else Bitmap.Config.ARGB_8888
-        val fullBitmap = createBitmap(srcWidth, srcHeight, config)
-        res.image.rewind()
-        fullBitmap.copyPixelsFromBuffer(res.image)
-        res.frame.close()
 
         // Downsample if needed. sampleSize is a power-of-two factor; the target
         // dimensions are src / sampleSize, matching BitmapFactory inSampleSize behaviour.
-        val bitmap = if (sampleSize > 1) {
-            val scaledWidth = (srcWidth / sampleSize).coerceAtLeast(1)
-            val scaledHeight = (srcHeight / sampleSize).coerceAtLeast(1)
-            val scaled = fullBitmap.scale(scaledWidth, scaledHeight)
-            fullBitmap.recycle()
-            scaled
+        val bitmap = if (width < srcWidth || height < srcHeight) {
+            val resized = if (res.isHdr) {
+                ca.mpreg.webgpuviewer.ImageUtil.resizeF16(
+                    res.image,
+                    res.width,
+                    res.height,
+                    width,
+                    height,
+                )
+            } else {
+                ca.mpreg.webgpuviewer.ImageUtil.resize(
+                    res.image,
+                    res.width,
+                    res.height,
+                    width,
+                    height,
+                )
+            }
+            val resizedBitmap = createBitmap(width, height, config)
+            resizedBitmap.copyPixelsFromBuffer(resized)
+            resizedBitmap
         } else {
+            // Copy RGBA pixels from the native buffer into a full-resolution bitmap.
+            // We must do this while `res` (and its native memory) is still alive.
+            // HDR frames are half-float RGBA.
+            val fullBitmap = createBitmap(srcWidth, srcHeight, config)
+            res.image.rewind()
+            fullBitmap.copyPixelsFromBuffer(res.image)
+            res.frame.close()
             fullBitmap
         }
 
         return DecodeResult(
             image = bitmap.asImage(),
-            isSampled = sampleSize > 1,
+            isSampled = width < srcWidth || height < srcHeight,
         )
     }
 
